@@ -126,11 +126,41 @@
             </ul>
           </div>
         </div>
+
+        <div class="reassign" x-show="isSuperuser && selected().status !== 'ready'" x-cloak>
+          <h3 style="font-size:1rem;margin:1.25rem 0 0.3rem;color:#1f4d6b">改挂工坊（主管）</h3>
+          <p class="hint" style="margin-bottom:0.6rem">
+            把本缸整笔改挂到另一工坊。<strong>目标坊若已占用相同缸号，整笔拒绝</strong>；
+            <strong>可染色状态的缸正在作业，禁止改挂</strong>，请先改回闲置或还原中。
+            浸染历史随缸保留，迁移后仍挂在本缸主键上可查。
+          </p>
+          <form method="post" :action="'/bay/vats/' + selected().id + '/reassign'">
+            <input type="hidden" name="workshop" :value="filterWs || ''">
+            <label>目标工坊
+              <select name="target_workshop_id" required>
+                <template x-for="w in targetWorkshops()" :key="w.id">
+                  <option :value="w.id" x-text="w.name + '（' + w.region + '）'"></option>
+                </template>
+              </select>
+            </label>
+            <button type="submit">改挂到目标坊</button>
+          </form>
+        </div>
+        <p class="hint" style="margin:1rem 0 0"
+           x-show="isSuperuser && selected().status === 'ready'" x-cloak>
+          该缸当前为可染色状态，正在作业，禁止改挂工坊。
+        </p>
+        <p class="hint" style="margin:1rem 0 0" x-show="!isSuperuser" x-cloak>
+          改挂工坊仅主管可操作；染缸工发起改挂一律拒绝。
+        </p>
       </div>
     </template>
   </div>
 
-  <p class="rule-foot">工坊只作缸位筛选片；浸染与状态均在缸位展开区内完成，无独立表页。</p>
+  <p class="rule-foot">
+    工坊 chip 仅作缸位筛选；浸染与状态均在缸位展开区内完成，无独立表页。
+    主管可在展开区把染缸整笔改挂到另一工坊：目标坊缸号冲突整笔拒绝、可染色缸禁迁、染缸工无权操作；浸染历史随缸保留。
+  </p>
 </div>
 
 <script>
@@ -138,6 +168,7 @@
     return {
       workshops: {{ workshops | tojson }},
       vats: {{ vats | tojson }},
+      isSuperuser: {{ 'true' if is_superuser else 'false' }},
       filterWs: {{ filter_workshop if filter_workshop is not none else 'null' }},
       selectedId: {{ selected_vat if selected_vat is not none else 'null' }},
       init() {
@@ -165,6 +196,11 @@
       filteredVats() {
         if (this.filterWs === null) return this.vats;
         return this.vats.filter(v => v.workshopId === this.filterWs);
+      },
+      targetWorkshops() {
+        const cur = this.selected();
+        if (!cur) return this.workshops;
+        return this.workshops.filter(w => w.id !== cur.workshopId);
       },
       toggle(id) {
         this.selectedId = this.selectedId === id ? null : id;

@@ -7,12 +7,17 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jinja2.utils import markupsafe
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import DipLot, Vat, Workshop
-from app.services.vat_rules import VatRuleError, validate_vat_status_change
+from app.services.vat_rules import (
+    VatRuleError,
+    validate_vat_reassign,
+    validate_vat_status_change,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -105,6 +110,7 @@ def _bay_context(
     return {
         "request": request,
         "user": user,
+        "is_superuser": bool(getattr(user, "is_superuser", False)),
         "workshops": [{"id": w.id, "name": w.name, "region": w.region} for w in workshops],
         "vats": [_vat_payload(v) for v in vats],
         "filter_workshop": workshop_id,
@@ -212,3 +218,117 @@ async def bay_log_lot(
 @router.get("/home")
 async def legacy_redirect():
     return RedirectResponse("/", status_code=303)
+
+
+@router.post("/bay/vats/{pk}/reassign", response_class=HTMLResponse)
+async def bay_vat_reassign(
+    pk: int,
+    request: Request,
+    target_workshop_id: str = Form(...),
+    workshop: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """主管把染缸改挂到另一工坊。
+
+    - 仅主管（is_superuser）可发起；染缸工一律拒绝且不踢登录；
+    - 目标坊已占用相同缸号则整笔拒绝，唯一约束兜住两主管并发撞号；
+    - 成功后 303 跳到目标坊 chip 并展开该缸，浸染历史仍挂原缸主键。
+    """
+    user = _need_login(request, db)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    # 当前筛选 chip：优先用表单回传，否则落到目标坊（成功时），失败渲染再校正
+    ws = int(workshop) if workshop.strip() else None
+
+    item = (
+        db.query(Vat)
+        .options(joinedload(Vat.workshop), joinedload(Vat.lots))
+        .filter(Vat.id == pk)
+        .first()
+    )
+    if not item:
+        return RedirectResponse("/", status_code=303)
+
+    # 染缸工发起改挂一律拒绝：保留登录会话，还原台仍正常打开
+    if not user.is_superuser:
+        db.rollback()
+        return render(
+            request,
+            "bay.html",
+            _bay_context(
+                request, db, user, ws if ws is not None else item.workshop_id, pk,
+                "权限不足：仅主管可改挂染缸所属工坊，染缸工发起改挂一律拒绝。",
+            ),
+            status_code=403,
+        )
+
+    try:
+        target_id = int(target_workshop_id)
+    except (TypeError, ValueError):
+        db.rollback()
+        return render(
+            request,
+            "bay.html",
+            _bay_context(request, db, user, ws, pk, "未选择目标工坊，改挂未生效。"),
+            status_code=400,
+        )
+
+    target = db.get(Workshop, target_id)
+    if target is None:
+        db.rollback()
+        return render(
+            request,
+            "bay.html",
+            _bay_context(request, db, user, ws, pk, "目标工坊不存在，改挂未生效。"),
+            status_code=400,
+        )
+
+    try:
+        validate_vat_reassign(db, item, target)
+        item.workshop_id = target.id
+        db.commit()
+    except VatRuleError as exc:
+        db.rollback()
+        # 留在原坊 chip 并保持面板打开，chip 集合仍完整可数
+        return render(
+            request,
+            "bay.html",
+            _bay_context(request, db, user, item.workshop_id, pk, exc.message),
+            status_code=400,
+        )
+    except IntegrityError:
+        # 两主管近乎同时把同缸号缸改挂进同一目标坊：唯一约束保证至多一笔成功
+        db.rollback()
+        db.refresh(item)
+        return render(
+            request,
+            "bay.html",
+            _bay_context(
+                request, db, user, item.workshop_id, pk,
+                f"目标坊「{target.name}」缸号 {item.code} 刚被占用（并发冲突），"
+                "整笔拒绝：本次改挂未生效。",
+            ),
+            status_code=409,
+        )
+    except OperationalError as exc:
+        # 提交期序列化失败（Postgres 死锁/序列化异常、SQLite 库锁等）：按撞号回退处理
+        db.rollback()
+        db.refresh(item)
+        pgcode = getattr(exc.orig, "pgcode", None)
+        transient = pgcode in ("40001", "40P01", "55P03") or "locked" in str(exc.orig).lower()
+        if not transient:
+            raise
+        return render(
+            request,
+            "bay.html",
+            _bay_context(
+                request, db, user, item.workshop_id, pk,
+                f"目标坊「{target.name}」此刻并发改挂过多，缸号 {item.code} 未写入，"
+                "整笔拒绝：请刷新后重试。",
+            ),
+            status_code=409,
+        )
+
+    # 成功：落到目标坊 chip 并展开该缸；缸位条工坊名由重渲染的 payload 同步
+    return RedirectResponse(f"/?workshop={target.id}&vat={pk}", status_code=303)
