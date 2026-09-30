@@ -50,6 +50,10 @@ def ensure_seed_data(db: Session) -> None:
     db.add_all([w1, w2])
     db.flush()
 
+    # 缸号布局（为「改挂」预留）：
+    #   V-02 两坊各一 —— 冲突号：把一号坊 V-02 改挂进二号坊会因同号被整笔拒绝；
+    #   V-03 仅一号坊 —— 可迁号：二号坊无此号，闲置的 V-03 可成功改挂过去；
+    #   二号坊 V-02 置为 ready，兼演示「可染色缸禁止改挂」。
     v1 = Vat(
         workshop_id=w1.id,
         code="V-01",
@@ -65,20 +69,27 @@ def ensure_seed_data(db: Session) -> None:
         status=Vat.STATUS_IDLE,
     )
     v3 = Vat(
+        workshop_id=w1.id,
+        code="V-03",
+        dyeType="土靛",
+        volumeL=Decimal("500.00"),
+        status=Vat.STATUS_IDLE,
+    )
+    v4 = Vat(
         workshop_id=w2.id,
         code="V-11",
         dyeType="土靛",
         volumeL=Decimal("900.00"),
         status=Vat.STATUS_REDUCING,
     )
-    v4 = Vat(
+    v5 = Vat(
         workshop_id=w2.id,
-        code="V-12",
+        code="V-02",
         dyeType="板蓝根靛",
         volumeL=Decimal("750.00"),
         status=Vat.STATUS_READY,
     )
-    db.add_all([v1, v2, v3, v4])
+    db.add_all([v1, v2, v3, v4, v5])
     db.flush()
 
     now = datetime.now(timezone.utc)
@@ -118,9 +129,20 @@ def ensure_seed_data(db: Session) -> None:
             ],
         )
     )
+    # 可迁号 V-03：带浸染历史，改挂成功后历史仍应挂在同一缸主键上可查
     db.add_all(
         lots(
             v3.id,
+            [
+                (30, "16.00", "-430.00"),
+                (18, "24.00", "-485.00"),
+                (9, "27.50", None),
+            ],
+        )
+    )
+    db.add_all(
+        lots(
+            v4.id,
             [
                 (40, "25.00", "-390.00"),
                 (30, "35.00", "-430.00"),
@@ -129,9 +151,10 @@ def ensure_seed_data(db: Session) -> None:
             ],
         )
     )
+    # 二号坊冲突号 V-02：ready 自洽（末笔 -530 ≤ -500），且占用一号坊 V-02 的同号
     db.add_all(
         lots(
-            v4.id,
+            v5.id,
             [
                 (48, "20.00", "-420.00"),
                 (32, "28.00", "-470.00"),

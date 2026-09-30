@@ -126,11 +126,48 @@
             </ul>
           </div>
         </div>
+
+        {% if user.is_superuser %}
+        <div class="rehang-box">
+          <h3 style="font-size:1rem;margin:0 0 0.5rem;color:#1f4d6b">改挂所属工坊（主管）</h3>
+          <template x-if="selected() && selected().status !== 'ready'">
+            <form method="post" :action="'/bay/vats/' + selected().id + '/rehang'" class="rehang-form">
+              <input type="hidden" name="workshop" :value="filterWs || ''">
+              <label>目标工坊
+                <select name="target_workshop" required>
+                  <template x-for="w in workshops.filter(x => x.id !== selected().workshopId)" :key="w.id">
+                    <option :value="w.id" x-text="w.name + '（' + w.region + '）'"></option>
+                  </template>
+                </select>
+              </label>
+              <label>迁入后缸号
+                <input
+                  type="text"
+                  name="code"
+                  maxlength="40"
+                  required
+                  :value="selected().code"
+                  placeholder="目标坊内使用的缸号"
+                >
+              </label>
+              <button type="submit" class="rehang-btn">改挂到目标坊</button>
+              <p class="rehang-note">
+                目标坊若已占用<strong>相同缸号</strong>则整笔拒绝、该缸仍留原坊；
+                <strong>可染色缸禁止改挂</strong>，请先改为闲置或还原中；
+                改挂只换所属坊与缸号、不动缸体主键，浸染历史仍随本缸可查。
+              </p>
+            </form>
+          </template>
+          <template x-if="selected() && selected().status === 'ready'">
+            <p class="rehang-note">该缸当前为<strong>可染色</strong>状态，<strong>禁止改挂</strong>；如需迁移，请先在上方改为闲置或还原中。</p>
+          </template>
+        </div>
+        {% endif %}
       </div>
     </template>
   </div>
 
-  <p class="rule-foot">工坊只作缸位筛选片；浸染与状态均在缸位展开区内完成，无独立表页。</p>
+  <p class="rule-foot">工坊只作缸位筛选片；浸染与状态均在缸位展开区内完成，无独立表页。改挂仅主管可用：目标坊同缸号整笔拒绝，可染色缸禁迁。</p>
 </div>
 
 <script>

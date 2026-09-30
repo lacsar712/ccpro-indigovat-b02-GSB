@@ -8,11 +8,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from jinja2.utils import markupsafe
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import DipLot, Vat, Workshop
-from app.services.vat_rules import VatRuleError, validate_vat_status_change
+from app.services.vat_rules import (
+    VatRuleError,
+    rehang_vat,
+    validate_vat_status_change,
+)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -203,6 +208,66 @@ async def bay_log_lot(
         _bay_context(request, db, user, ws, pk, error),
         status_code=400,
     )
+
+
+@router.post("/bay/vats/{pk}/rehang", response_class=HTMLResponse)
+async def bay_vat_rehang(
+    pk: int,
+    request: Request,
+    target_workshop: str = Form(...),
+    code: str = Form(""),
+    workshop: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """主管把染缸改挂到目标坊（可同时改缸号）。
+
+    成功：写库后 PRG 到「目标坊 chip + 选中该缸」，原坊 chip 下不再出现该缸。
+    失败：回滚整笔事务后仍重渲染还原台——chip 集合可数、缸位条不空白、不清会话。
+    """
+    user = _need_login(request, db)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    item = (
+        db.query(Vat)
+        .options(joinedload(Vat.workshop))
+        .filter(Vat.id == pk)
+        .first()
+    )
+    ws = int(workshop) if workshop.strip() else None
+    if not item:
+        return RedirectResponse("/", status_code=303)
+
+    original_workshop_id = item.workshop_id
+    error = None
+    try:
+        target_id = int(target_workshop)
+    except (TypeError, ValueError):
+        target_id = None
+        error = "未选择有效的目标工坊，改挂整笔拒绝。"
+
+    if error is None:
+        try:
+            rehang_vat(db, user, item, target_id, code)
+            db.commit()
+            # 成功后落到目标坊 chip，并保持展开该缸（主键不变，浸染历史仍可查）
+            return RedirectResponse(
+                f"/?vat={pk}&workshop={target_id}", status_code=303
+            )
+        except VatRuleError as exc:
+            db.rollback()
+            error = exc.message
+        except IntegrityError:
+            # 近乎同时两笔改挂撞同一缸号：唯一约束兜底，至多一笔成功
+            db.rollback()
+            error = (
+                "目标工坊该缸号刚被占用（并发冲突），缸号冲突，整笔拒绝；"
+                "该缸仍留在原坊。"
+            )
+
+    # 失败时回到原坊 chip 并展开该缸，便于核对缸号与状态；还原台始终可用
+    back_ws = ws if ws is not None else original_workshop_id
+    ctx = _bay_context(request, db, user, back_ws, pk, error)
+    return render(request, "bay.html", ctx, status_code=400)
 
 
 # 旧顶栏 CRUD 路径一律回到还原台，避免「换皮表页」残留入口
